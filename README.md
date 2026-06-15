@@ -1,2 +1,70 @@
-# Pylontech-Monitor-2.0
-Batteriedaten von Pylontech-Akkus per WLAN abrufen und per MQTT senden. Basierend auf dem LilyGo T-RS3 (ESP32-S3).
+# Pylontech Monitor 2.0 (ESP32 / LilyGo T-RS3)
+
+Dieses Projekt ermöglicht es, Pylontech-Akkus (bis zu 16 Stück im Verbund) über die serielle Konsole (RS232) auszulesen und die Daten komfortabel per WLAN im Web-Dashboard anzuzeigen oder via MQTT an Smart-Home-Systeme (wie z.B. Home Assistant) zu übertragen.
+
+Das Projekt basiert auf der Hardware **LilyGo T-RS3** (ESP32-S3), welche über galvanisch isolierte RS232/RS485-Schnittstellen verfügt und somit maximale Sicherheit für deine Akkus bietet.
+
+## 🚀 Features
+
+- **Echtzeit-Dashboard:** Anzeige von Gesamt-SOC, Spannung, Gesamtstrom, minimaler/maximaler Zellspannung und Temperaturen.
+- **Einzelbatterie-Ansicht:** Unterstützung von bis zu 16 Batterien im Verbund mit detaillierter Auflistung aller einzelnen Zellspannungen.
+- **History / Status-Abfrage:** Direktes Auslesen der internen Logdaten (`stat`) des Master-Akkus (Ladezyklen, Alarme wie High Voltage etc.).
+- **Smart Home Integration:** Optionale MQTT-Unterstützung zur einfachen Datenweitergabe.
+- **Einfaches Setup:** Komfortables Captive-Portal zur WLAN- und MQTT-Konfiguration bei der Ersteinrichtung. Erreichbar im Netzwerk über `http://pylontech.local`.
+
+---
+
+## 🛠 Hardware-Anforderungen
+
+1. **LilyGo T-RS3** (ESP32-S3 Board mit isoliertem RS232)
+2. **Eigenbau-Verbindungskabel:** RJ45-Stecker auf einen DB9-Stecker (oder direkt passend verdrahtet für die Schraubklemmen des LilyGo).
+
+---
+
+## 🔌 Kabel-Pinbelegung (RJ45 auf DB9)
+
+Um den LilyGo T-RS3 mit dem **Konsolen-Port** der Pylontech Master-Batterie zu verbinden, musst du dir ein passendes Kabel anfertigen. Hier ist die genaue Belegung, wie sie im Projekt erfolgreich getestet wurde:
+
+| Signal | Pylontech (RJ45 Stecker) | Standard-Farbe (T568B) | LilyGo / PC (DB9 Stecker) |
+| :--- | :--- | :--- | :--- |
+| **TX** (Senden) | Pin 3 | Weiß-Grün | **Pin 3** (RX) |
+| **RX** (Empfangen) | Pin 6 | Grün | **Pin 2** (TX) |
+| **GND** (Masse) | Pin 8 | Braun | **Pin 5** (GND) |
+
+*Wichtig:* Stelle sicher, dass du das Kabel am Pylontech-Akku in den mit **"Console"** beschrifteten Port steckst, nicht in die reinen RS485-Ports!
+
+---
+
+## 💾 Downloads & Installation
+
+Du kannst das Projekt auf zwei Arten nutzen:
+
+### 1. Ready-to-Flash (Firmware-Binary) – *Empfohlen für Anwender*
+Für eine schnelle Installation ohne Programmierkenntnisse lade dir einfach die fertige `.bin`-Datei aus den **Releases** herunter.
+*(Wie du diese Datei auf den ESP32 flasht, zeige ich dir im Installations-Video.)*
+
+### 2. Quellcode (Arduino IDE / PlatformIO) – *Für Entwickler*
+Wenn du den Code anpassen oder selbst kompilieren möchtest, findest du in diesem Repository die vollständige Struktur.
+Die Pin-Definitionen für das Board befinden sich in der `utilities.h`.
+
+---
+
+## ⚙️ Erste Einrichtung
+
+1. Nach dem Flashen öffnet der Monitor ein eigenes WLAN-Netzwerk namens **Pylontech Monitor**.
+2. Verbinde dich mit diesem WLAN – es öffnet sich automatisch die Konfigurationsseite.
+3. Wähle dein Heim-WLAN aus, gib das Passwort ein und trage (optional) die IP-Adresse deines MQTT-Brokers ein.
+4. Nach dem Speichern startet der ESP32 neu und ist in deinem Netzwerk unter **`http://pylontech.local`** erreichbar.
+
+---
+
+## 📺 YouTube-Videos zum Projekt
+
+- **Projektvorstellung (Wie es aussieht & Funktionen):** [Pylontech Monitor 2.0 | Batteriedaten per WLAN abrufen](https://youtu.be/9clY8Vlowe4)
+- **Installations- & Flash-Anleitung (Teil 2):** *Video folgt in Kürze!*
+
+---
+
+## 📄 Lizenz & Credits
+Der Code steht unter der MIT-Lizenz. 
+*Hinweis:* Da ich kein professioneller Programmierer bin, ist dieser Code mit tatkräftiger Unterstützung von KI (ChatGPT & Gemini) entstanden, läuft in Tests bisher aber absolut zuverlässig!
