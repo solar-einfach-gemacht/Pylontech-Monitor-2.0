@@ -374,8 +374,8 @@ void calcSystem()
   float voltageSum = 0;
   int count = 0;
 
-  systemStats.minCell = 999;
-  systemStats.maxCell = 0;
+  systemStats.minCell = 999.0;
+  systemStats.maxCell = 0.0;
   systemStats.totalCurrent = 0;
 
   for(int i = 0; i < 16; i++)
@@ -387,11 +387,20 @@ void calcSystem()
     systemStats.totalCurrent += batteries[i].current;
     count++;
 
-    if(batteries[i].cellMin > 0 && batteries[i].cellMin < systemStats.minCell)
-      systemStats.minCell = batteries[i].cellMin;
+    for(int c = 0; c < batteries[i].cellCount; c++)
+    {
+      float currentCellVolt = batteries[i].cellVoltages[c];
 
-    if(batteries[i].cellMax > systemStats.maxCell)
-      systemStats.maxCell = batteries[i].cellMax;
+      if(currentCellVolt > 2.0 && currentCellVolt < 4.0) 
+      {
+        if(currentCellVolt < systemStats.minCell) {
+          systemStats.minCell = currentCellVolt;
+        }
+        if(currentCellVolt > systemStats.maxCell) {
+          systemStats.maxCell = currentCellVolt;
+        }
+      }
+    }
   }
 
   if(count > 0)
