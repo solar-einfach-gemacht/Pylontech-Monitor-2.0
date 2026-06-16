@@ -1,8 +1,8 @@
-# Pylontech Monitor 2.0 (ESP32 / LilyGo T-RS3)
+# Pylontech Monitor 2.0 (ESP32 / LilyGo T-RSS3)
 
 Dieses Projekt ermöglicht es, Pylontech-Akkus (bis zu 16 Stück im Verbund) über die serielle Konsole (RS232) auszulesen und die Daten komfortabel per WLAN im Web-Dashboard anzuzeigen oder via MQTT an Smart-Home-Systeme (wie z.B. Home Assistant) zu übertragen.
 
-Das Projekt basiert auf der Hardware **LilyGo T-RS3** (ESP32-S3), welche über galvanisch isolierte RS232/RS485-Schnittstellen verfügt und somit maximale Sicherheit für deine Akkus bietet.
+Das Projekt basiert auf der Hardware **LilyGo T-RSS3** (ESP32-S3), welche über galvanisch isolierte RS232/RS485-Schnittstellen verfügt und somit maximale Sicherheit für deine Akkus bietet.
 
 ## 🚀 Features
 
@@ -16,8 +16,8 @@ Das Projekt basiert auf der Hardware **LilyGo T-RS3** (ESP32-S3), welche über g
 
 ## 🛠 Hardware-Anforderungen
 
-1. **LilyGo T-RS3** (ESP32-S3 Board mit isoliertem RS232)
-2. **Eigenbau-Verbindungskabel:** RJ45-Stecker auf einen DB9-Stecker (oder direkt passend verdrahtet für die Schraubklemmen des LilyGo).
+1. **LilyGo T-RSS3** (ESP32-S3 Board mit isoliertem RS232)
+2. **Eigenbau-Verbindungskabel:** RJ45-Stecker auf einen DB9-Stecker.
 
 ---
 
