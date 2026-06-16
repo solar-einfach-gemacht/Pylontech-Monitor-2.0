@@ -68,3 +68,5 @@ Die Pin-Definitionen für das Board befinden sich in der `utilities.h`.
 ## 📄 Lizenz & Credits
 Der Code steht unter der MIT-Lizenz. 
 *Hinweis:* Da ich kein professioneller Programmierer bin, ist dieser Code mit tatkräftiger Unterstützung von KI (ChatGPT & Gemini) entstanden, läuft in Tests bisher aber absolut zuverlässig!
+
+![Pylontech Monitor Dashboard](screenshot/Screenshot(8).png)
