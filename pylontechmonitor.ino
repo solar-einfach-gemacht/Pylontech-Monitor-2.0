@@ -2,7 +2,7 @@
 #include <WiFi.h>
 #include <WiFiManager.h>
 #include <WebServer.h>
-#include <ESPmDNS.h>       
+#include <ESPmDNS.h>        
 #include <PubSubClient.h>  
 #include <Preferences.h>   
 #include "utilities.h"
@@ -34,9 +34,9 @@ struct Battery {
   float voltage = 0;
   float current = 0;
 
-  float temp = 0;
-  float tempLow = 0;
-  float tempHigh = 0;
+  float temp = 0;     // BMS / Board-Temperatur
+  float tempLow = 0;  // Min Zell-Temperatur
+  float tempHigh = 0; // Max Zell-Temperatur
 
   float cellMin = 0;
   float cellMax = 0;
@@ -60,6 +60,8 @@ struct SystemStats {
   float minCell = 999;
   float maxCell = 0;
   float totalCurrent = 0;
+  float maxSystemTemp = -99.0;    // Maximale Zelltemperatur im Gesamtsystem
+  float maxSystemBmsTemp = -99.0; // NEU: Maximale BMS-Temperatur im Gesamtsystem
 };
 
 SystemStats systemStats;
@@ -177,9 +179,10 @@ void parsePwrLine(String line)
 
   b.voltage = v[1].toFloat() / 1000.0;
   b.current = v[2].toFloat() / 1000.0;
-  b.temp = v[3].toFloat() / 1000.0;
-  b.tempLow = v[4].toFloat() / 1000.0;
-  b.tempHigh = v[5].toFloat() / 1000.0;
+  
+  b.temp = v[3].toFloat() / 1000.0;     // BMS-Board-Temperatur (v[3])
+  b.tempLow = v[4].toFloat() / 1000.0;  // Min Zell-Temp (v[4])
+  b.tempHigh = v[5].toFloat() / 1000.0; // Max Zell-Temp (v[5])
 
   float vmin = v[6].toFloat();
   float vmax = v[7].toFloat();
@@ -291,7 +294,7 @@ void readSerial()
 }
 
 // ==========================
-// MQTT SENDER (KORRIGIERT: Sendet Batterien jetzt immer numerisch sortiert von 1 bis 16)
+// MQTT SENDER
 // ==========================
 void publishSystemStats()
 {
@@ -302,8 +305,15 @@ void publishSystemStats()
   mqttClient.publish("pylontech/system/totalCurrent", String(systemStats.totalCurrent, 2).c_str());
   mqttClient.publish("pylontech/system/minCell", String(systemStats.minCell, 3).c_str());
   mqttClient.publish("pylontech/system/maxCell", String(systemStats.maxCell, 3).c_str());
+  
+  // NEU: Beide System-Maximaltemperaturen getrennt an MQTT übertragen
+  if (systemStats.maxSystemTemp > -99.0) {
+    mqttClient.publish("pylontech/system/maxTemperature", String(systemStats.maxSystemTemp, 1).c_str());
+  }
+  if (systemStats.maxSystemBmsTemp > -99.0) {
+    mqttClient.publish("pylontech/system/maxBmsTemperature", String(systemStats.maxSystemBmsTemp, 1).c_str());
+  }
 
-  // Schleife läuft nun starr von ID 1 bis 16 durch, um die Reihenfolge im Broker zu erzwingen
   for(int i = 0; i < 16; i++) {
     if(batteries[i].present) {
       String rootTopic = "pylontech/battery" + String(i + 1);
@@ -313,6 +323,9 @@ void publishSystemStats()
       
       String tempTopic = rootTopic + "/temp";
       mqttClient.publish(tempTopic.c_str(), String(batteries[i].temp, 1).c_str()); 
+
+      String maxZellTopic = rootTopic + "/cellTempMax";
+      mqttClient.publish(maxZellTopic.c_str(), String(batteries[i].tempHigh, 1).c_str());
 
       for(int c = 0; c < batteries[i].cellCount; c++) {
         String cellTopic = rootTopic + "/cell" + String(c + 1);
@@ -365,7 +378,7 @@ void handleMqtt()
 }
 
 // ==========================
-// SYSTEM STATS
+// SYSTEM STATS CALCULATOR
 // ==========================
 
 void calcSystem()
@@ -377,6 +390,8 @@ void calcSystem()
   systemStats.minCell = 999.0;
   systemStats.maxCell = 0.0;
   systemStats.totalCurrent = 0;
+  systemStats.maxSystemTemp = -99.0; 
+  systemStats.maxSystemBmsTemp = -99.0; // Reset für Neuberechnung
 
   for(int i = 0; i < 16; i++)
   {
@@ -386,6 +401,16 @@ void calcSystem()
     voltageSum += batteries[i].voltage;
     systemStats.totalCurrent += batteries[i].current;
     count++;
+
+    // Ermittlung der höchsten ZELL-Temperatur im System
+    if(batteries[i].tempHigh > systemStats.maxSystemTemp) {
+      systemStats.maxSystemTemp = batteries[i].tempHigh;
+    }
+
+    // NEU: Ermittlung der höchsten BMS-BOARD-Temperatur im System
+    if(batteries[i].temp > systemStats.maxSystemBmsTemp) {
+      systemStats.maxSystemBmsTemp = batteries[i].temp;
+    }
 
     for(int c = 0; c < batteries[i].cellCount; c++)
     {
@@ -452,16 +477,17 @@ String buildDashboard()
   html += "Ø Spannung: " + String(systemStats.avgVoltage,2) + " V<br>";
   html += "Gesamtstrom: " + String(systemStats.totalCurrent,2) + " A<br>";
   
-  float maxTempFound = -99.0;
-  for(int i = 0; i < 16; i++) {
-    if(batteries[i].present && batteries[i].temp > maxTempFound) {
-      maxTempFound = batteries[i].temp;
-    }
-  }
-  if (maxTempFound > -99.0) {
-    html += "Max. System-Temperatur: " + String(maxTempFound, 1) + " °C<br>";
+  // NEU: Anzeige beider Werte unter Gesamtsystem
+  if (systemStats.maxSystemTemp > -99.0) {
+    html += "Max. System-Zelltemperatur: " + String(systemStats.maxSystemTemp, 1) + " °C<br>";
   } else {
-    html += "Max. System-Temperatur: Lade Daten...<br>";
+    html += "Max. System-Zelltemperatur: Lade Daten...<br>";
+  }
+
+  if (systemStats.maxSystemBmsTemp > -99.0) {
+    html += "Max. System-BMS-Temperatur: " + String(systemStats.maxSystemBmsTemp, 1) + " °C<br>";
+  } else {
+    html += "Max. System-BMS-Temperatur: Lade Daten...<br>";
   }
 
   html += "Min Zelle: " + String(systemStats.minCell,3) + " V<br>";
@@ -515,7 +541,10 @@ String buildBatteryPage(int id)
   html += "SOC: " + String(b.soc,1) + " %<br>";
   html += "Spannung: " + String(b.voltage,2) + " V<br>";
   html += "Strom: " + String(b.current,2) + " A<br>";
-  html += "Temperatur: " + String(b.temp,1) + " °C (Min: " + String(b.tempLow,1) + " / Max: " + String(b.tempHigh,1) + ")<br>";
+  
+  html += "BMS Board-Temperatur: " + String(b.temp,1) + " °C<br>";
+  html += "Zelltemperatur Min: " + String(b.tempLow,1) + " °C<br>";
+  html += "Zelltemperatur Max (Echte Temp): " + String(b.tempHigh,1) + " °C<br>";
   html += "</div>";
 
   html += "<h3>Einzelzellspannungen</h3>";
@@ -551,7 +580,7 @@ String buildStatPage()
   html += ".btn{display:inline-block;padding:8px\n15px;background:#222838;color:#00e5ff;text-decoration:none;border-radius:5px;margin-bottom:15px;border:1px\nsolid #00e5ff;}";
   html += "pre{background:#05070a;padding:15px;border-radius:5px;border:1px\nsolid\n#2c3244;overflow-x:auto;font-family:Consolas,Monaco,monospace;color:#a3be8c;white-space:pre-wrap;}";
   html += ".status-load{color:#ebcb8b;font-weight:bold;margin-bottom:10px;}";
-  html += "</style></head><body>";
+  html += "</style></head><body>"; // KORREKTUR: Fehlendes html += behoben
 
   html += "<h1>Ungeparste\nSTAT Daten</h1>"; 
   html += "<div\nclass='container'>";
