@@ -75,7 +75,7 @@ Im Code ist absichtlich eine **Pause von 5,5 Sekunden** nach jeder Abfrage einge
 ## 📺 YouTube-Videos zum Projekt
 
 - **Projektvorstellung (Wie es aussieht & Funktionen):** [Pylontech Monitor 2.0 | Batteriedaten per WLAN abrufen](https://youtu.be/9clY8Vlowe4)
-- **Installations- & Flash-Anleitung (Teil 2):** *Video folgt in Kürze!*
+- **Installations- & Flash-Anleitung (Teil 2):** [INSTALLATION PYLONTECH MONITOR 2.0](https://youtu.be/xqEf1-rVG7A)
 
 ---
 
