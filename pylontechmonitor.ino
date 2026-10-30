@@ -7,13 +7,14 @@
 #include <Preferences.h>
 #include "utilities.h"
 
+#define FW_VERSION "2.0.6"
+
 // ==========================
 // KONFIGURATION (Stabilität)
 // ==========================
-const unsigned long STALE_MS          = 90000;   // Daten älter als 90 s gelten als veraltet (Zyklus bei 4 Akkus ca. 28 s)
 const unsigned long WIFI_RECONNECT_MS = 30000;   // nach 30 s ohne WLAN: Reconnect versuchen
 const unsigned long WIFI_RESTART_MS   = 120000;  // nach 2 min ohne WLAN: Neustart
-const unsigned long MQTT_RESTART_MS   = 300000;  // nach 5 min ohne erfolgreichen MQTT-Publish: Neustart
+const unsigned long MQTT_RESTART_MIN_MS = 300000; // Mindestzeit ohne MQTT-Erfolg bis Neustart (wächst mit Intervall)
 const unsigned long BAT_CMD_GAP_MS    = 400;     // Pause zwischen "unit X" und "bat X"
 
 // ==========================
@@ -27,16 +28,30 @@ char mqtt_server[40] = "";
 char mqtt_user[40] = "";
 char mqtt_pass[40] = "";
 
-// WiFiManager-Parameter global, damit der Save-Callback die neuen Werte lesen kann
-WiFiManagerParameter custom_mqtt_server("server", "MQTT Broker IP", "", 40);
-WiFiManagerParameter custom_mqtt_user("user", "MQTT Username (optional)", "", 40);
-WiFiManagerParameter custom_mqtt_pass("pass", "MQTT Passwort (optional)", "", 40, "type='password'");
-
 unsigned long lastMqttRetry = 0;
 unsigned long lastMqttPublish = 0;
 unsigned long lastMqttSuccess = 0;
-const unsigned long MQTT_INTERVAL = 5000;
+bool mqttEverWorked = false;
 bool mqttReady = false;
+
+bool shouldSaveConfig = false;
+
+// Konfiguration (aus dem Flash-Speicher)
+unsigned int queryIntervalMs = 5500;
+unsigned int configuredBatteryCount = 4; // Standard: 4 Akkus (im Web-UI bis 16 einstellbar)
+
+// Zeit, nach der Daten als veraltet gelten (skaliert mit Intervall und Akku-Anzahl)
+// Formel: (Anzahl Akkus + 1) * Intervall * 2 (Toleranzfaktor) + 15 Sekunden Puffer
+unsigned long staleMs()
+{
+  return ((unsigned long)(configuredBatteryCount + 1) * queryIntervalMs * 2UL) + 15000UL;
+}
+
+unsigned long mqttRestartMs()
+{
+  unsigned long t = (unsigned long)queryIntervalMs * 3UL + 60000UL;
+  return (t < MQTT_RESTART_MIN_MS) ? MQTT_RESTART_MIN_MS : t;
+}
 
 // ==========================
 // DATA MODEL
@@ -44,19 +59,19 @@ bool mqttReady = false;
 
 struct Battery {
   bool present = false;
+  unsigned long lastSeen = 0;
 
   float soc = 0;
   float voltage = 0;
   float current = 0;
 
-  float temp = 0;      // BMS / Board-Temperatur
-  float tempLow = 0;   // Min Zell-Temperatur
-  float tempHigh = 0;  // Max Zell-Temperatur
+  float temp = 0;
+  float tempLow = 0;
+  float tempHigh = 0;
 
   float cellMin = 0;
   float cellMax = 0;
 
-  // Einzelzellen (0 bis 15) - nur gültige, vollständig empfangene Werte
   float cellVoltages[16] = {0};
   int cellCount = 0;
 
@@ -74,8 +89,8 @@ struct Battery {
 
 Battery batteries[16];
 
-bool pwrFresh(const Battery &b)   { return b.lastPwrUpdate  != 0 && (millis() - b.lastPwrUpdate)  < STALE_MS; }
-bool cellsFresh(const Battery &b) { return b.lastCellUpdate != 0 && (millis() - b.lastCellUpdate) < STALE_MS; }
+bool pwrFresh(const Battery &b)   { return b.lastPwrUpdate  != 0 && (millis() - b.lastPwrUpdate)  < staleMs(); }
+bool cellsFresh(const Battery &b) { return b.lastCellUpdate != 0 && (millis() - b.lastCellUpdate) < staleMs(); }
 
 // ==========================
 // SYSTEM STATS
@@ -88,8 +103,8 @@ struct SystemStats {
   float minCell = 999;
   float maxCell = 0;
   float totalCurrent = 0;
-  float maxSystemTemp = -99.0;     // Maximale Zelltemperatur im Gesamtsystem
-  float maxSystemBmsTemp = -99.0;  // Maximale BMS-Temperatur im Gesamtsystem
+  float maxSystemTemp = -99.0;
+  float maxSystemBmsTemp = -99.0;
 };
 
 SystemStats systemStats;
@@ -110,7 +125,6 @@ int nextQueryIndex = 0;
 int pendingBatId = 0;
 unsigned long pendingBatAt = 0;
 
-// Variablen für die manuelle STAT-Abfrage
 String statOutput = "";
 bool statQueryInProgress = false;
 unsigned long statStartTime = 0;
@@ -130,7 +144,7 @@ WebServer server(80);
 
 void flushRx()
 {
-  while(Serial0.available()) Serial0.read();
+  while(Serial1.available()) Serial1.read();
   rxBuffer = "";
 }
 
@@ -143,7 +157,7 @@ void resetBatTmp(int id)
 }
 
 // Übernimmt die empfangenen Zellwerte erst, wenn die Antwort (weitgehend) komplett ist.
-// Zellen, die nicht empfangen wurden, behalten ihren letzten gültigen Wert.
+// Nicht empfangene Zellen behalten ihren letzten gültigen Wert.
 void commitBat()
 {
   if(targetBatId < 1 || targetBatId > 16) return;
@@ -163,6 +177,7 @@ void commitBat()
   {
     if(b.tmpCellCount > b.cellCount) b.cellCount = b.tmpCellCount;
     b.lastCellUpdate = millis();
+    b.lastSeen = millis();
   }
   resetBatTmp(targetBatId);
   currentMode = MODE_NONE;
@@ -178,7 +193,7 @@ void requestPwr()
 
   flushRx();
   currentMode = MODE_PWR;
-  Serial0.print("\npwr\n");   // erstes \n weckt den Prompt auf, falls die Konsole hängt
+  Serial1.print("\npwr\n");   // erstes \n weckt den Prompt auf, falls die Konsole hängt
 }
 
 void requestBat(int id)
@@ -190,7 +205,7 @@ void requestBat(int id)
   targetBatId = id;
   resetBatTmp(id);
 
-  Serial0.printf("\nunit %d\n", id);
+  Serial1.printf("\nunit %d\n", id);
   pendingBatId = id;
   pendingBatAt = millis() + BAT_CMD_GAP_MS;
 }
@@ -202,12 +217,11 @@ void servicePendingBat()
   {
     flushRx();
     currentMode = MODE_BAT;
-    Serial0.printf("bat %d\n", pendingBatId);
+    Serial1.printf("bat %d\n", pendingBatId);
     pendingBatId = 0;
   }
 }
 
-// Startet die manuelle STAT-Abfrage
 void triggerStatQuery(int unitId)
 {
   if(currentMode == MODE_BAT) commitBat();
@@ -222,7 +236,7 @@ void triggerStatQuery(int unitId)
   statTargetUnit = unitId;
   statStep = 0;
 
-  Serial0.print("stat\n");
+  Serial1.print("stat\n");
 }
 
 // ==========================
@@ -262,15 +276,20 @@ void parsePwrLine(String line)
   int id = v[0].toInt();
   if(id < 1 || id > 16) return;
 
+  float parsedVoltage = v[1].toFloat() / 1000.0;
+  if(parsedVoltage < 42.0) return;
+
   Battery &b = batteries[id - 1];
   b.present = true;
+  b.lastSeen = millis();
+  b.lastPwrUpdate = millis();
 
-  b.voltage = v[1].toFloat() / 1000.0;
+  b.voltage = parsedVoltage;
   b.current = v[2].toFloat() / 1000.0;
 
-  b.temp = v[3].toFloat() / 1000.0;      // BMS-Board-Temperatur (v[3])
-  b.tempLow = v[4].toFloat() / 1000.0;   // Min Zell-Temp (v[4])
-  b.tempHigh = v[5].toFloat() / 1000.0;  // Max Zell-Temp (v[5])
+  b.temp = v[3].toFloat() / 1000.0;
+  b.tempLow = v[4].toFloat() / 1000.0;
+  b.tempHigh = v[5].toFloat() / 1000.0;
 
   float vmin = v[6].toFloat();
   float vmax = v[7].toFloat();
@@ -286,7 +305,6 @@ void parsePwrLine(String line)
     b.soc = line.substring(start, p).toFloat();
   }
   b.raw = line;
-  b.lastPwrUpdate = millis();
 }
 
 // ==========================
@@ -357,9 +375,9 @@ bool isEndOfResponse(const String &line)
 
 void readSerial()
 {
-  while(Serial0.available())
+  while(Serial1.available())
   {
-    char c = Serial0.read();
+    char c = Serial1.read();
 
     if(statQueryInProgress) {
       if(statOutput.length() < STAT_MAX_LEN) statOutput += c;
@@ -403,7 +421,10 @@ void readSerial()
 bool pubStr(const char *topic, const char *val)
 {
   bool ok = mqttClient.publish(topic, val);
-  if(ok) lastMqttSuccess = millis();
+  if(ok) {
+    lastMqttSuccess = millis();
+    mqttEverWorked = true;
+  }
   return ok;
 }
 
@@ -417,6 +438,9 @@ void pubFloat(const char *topic, float value, int decimals)
 void publishSystemStats()
 {
   if (!mqttClient.connected()) return;
+
+  // Lebenszeichen (hält auch den Neustart-Watchdog zufrieden, wenn gerade keine Akkudaten da sind)
+  pubStr("pylontech/status", "online");
 
   if (systemStats.valid)
   {
@@ -442,7 +466,7 @@ void publishSystemStats()
     Battery &b = batteries[i];
     if(!b.present) continue;
 
-    // Veraltete Daten NICHT mehr veröffentlichen -> Home Assistant sieht einen echten Ausfall
+    // Veraltete Daten NICHT veröffentlichen -> Home Assistant sieht einen echten Ausfall
     if(pwrFresh(b))
     {
       snprintf(topic, sizeof(topic), "pylontech/battery%d/soc", i + 1);
@@ -488,6 +512,7 @@ void handleMqtt()
       if (ok)
       {
         pubStr("pylontech/status", "online");
+        pubStr("pylontech/version", FW_VERSION);
         mqttReady = true;
       }
       else
@@ -500,7 +525,7 @@ void handleMqtt()
 
   mqttClient.loop();
 
-  if (millis() - lastMqttPublish > MQTT_INTERVAL)
+  if (millis() - lastMqttPublish > queryIntervalMs)
   {
     lastMqttPublish = millis();
     publishSystemStats();
@@ -536,8 +561,9 @@ void checkWatchdogs()
     wifiLostSince = 0;
   }
 
-  // Kein erfolgreicher MQTT-Publish mehr -> Neustart
-  if (strlen(mqtt_server) > 0 && (millis() - lastMqttSuccess) > MQTT_RESTART_MS) {
+  // MQTT lief schon einmal, liefert aber seit längerer Zeit nichts mehr -> Neustart.
+  // (Bei nie funktionierender Broker-Konfiguration wird bewusst NICHT neu gestartet.)
+  if (strlen(mqtt_server) > 0 && mqttEverWorked && (millis() - lastMqttSuccess) > mqttRestartMs()) {
     ESP.restart();
   }
 }
@@ -548,6 +574,8 @@ void checkWatchdogs()
 
 void calcSystem()
 {
+  unsigned long timeoutThreshold = staleMs();
+
   float socSum = 0;
   float voltageSum = 0;
   int count = 0;
@@ -562,6 +590,11 @@ void calcSystem()
   {
     Battery &b = batteries[i];
     if(!b.present) continue;
+
+    if(millis() - b.lastSeen > timeoutThreshold) {
+      b.present = false;
+      continue;
+    }
 
     if(pwrFresh(b))
     {
@@ -607,11 +640,11 @@ void calcSystem()
 String buildDashboard()
 {
   String html;
-  html.reserve(5000);
+  html.reserve(6000);
 
   html += "<html><head><meta charset='utf-8'>";
   html += "<meta name='viewport' content='width=device-width, initial-scale=1'>";
-  html += "<meta http-equiv='refresh' content='5'>";
+  html += "<meta http-equiv='refresh' content='" + String(queryIntervalMs / 1000) + "'>";
 
   html += "<style>";
   html += "body{margin:0;font-family:Arial,sans-serif;background:#0f1115;color:#e6e6e6;}";
@@ -622,9 +655,9 @@ String buildDashboard()
   html += ".box:hover{border-color:#00e5ff;background:#222838;}";
   html += ".system{background:#141824;padding:15px;border-radius:10px;margin-bottom:15px;border:1px solid #1f2536;}";
   html += ".btn-container{display:flex;flex-wrap:wrap;gap:10px;margin-bottom:15px;}";
-  html += ".btn-stat{padding:10px 15px;background:#00e5ff;color:#0f1115;text-decoration:none;border-radius:5px;font-weight:bold;transition:0.2s;}";
+  html += ".btn-stat{padding:10px 15px;background:#00e5ff;color:#0f1115;text-decoration:none;border-radius:5px;font-weight:bold;transition:0.2s;border:none;cursor:pointer;}";
   html += ".btn-stat:hover{background:#00b3cc;}";
-  html += ".stale{color:#ebcb8b;font-weight:bold;}";
+  html += "input[type=range]{width:100%; margin-top:10px; margin-bottom:10px; accent-color:#00e5ff;}";
   html += "</style></head><body>";
 
   html += "<h1>Pylontech Monitor</h1>";
@@ -632,12 +665,39 @@ String buildDashboard()
 
   html += "<strong>Manuelle Rohdatenabfrage:</strong><br>";
   html += "<div class='btn-container'>";
-  html += "<a class='btn-stat' href='/triggerstat?id=1'>&#9889; STAT Bat</a>";
+  html += "<a class='btn-stat' href='/triggerstat?id=1'>⚡ STAT Bat</a>";
   html += "</div>";
 
   html += "<strong>System-Optionen:</strong><br>";
   html += "<div class='btn-container'>";
-  html += "<a class='btn-stat' style='background:#f44336; color:#fff;' href='/resetwifi' onclick=\"return confirm('WLAN & MQTT wirklich löschen und neu starten?');\">&#9888;&#65039; Monitor zurücksetzen</a>";
+  html += "<form action='/resetwifi' method='POST' style='margin:0;' onsubmit=\"return confirm('WLAN & MQTT wirklich löschen und neu starten?');\">";
+  html += "<input type='submit' class='btn-stat' style='background:#f44336; color:#fff;' value='⚠️ Monitor zurücksetzen'>";
+  html += "</form>";
+  html += "</div>";
+
+  // Konfigurations-Bereich
+  html += "<div class='system' style='display:flex; flex-wrap:wrap; gap:20px;'>";
+
+  // Regler 1: Intervall
+  html += "<div style='flex:1; min-width:250px;'>";
+  html += "<strong>Abfrage-Intervall:</strong><br>";
+  html += "<form action='/setinterval' method='GET' style='margin:0;'>";
+  html += "<input type='range' name='sec' min='5' max='300' value='" + String(queryIntervalMs / 1000) + "' oninput='document.getElementById(\"sliderVal\").innerText = this.value + \" Sekunden\";'>";
+  html += "<div>Aktuell: <span id='sliderVal' style='color:#00e5ff; font-weight:bold;'>" + String(queryIntervalMs / 1000) + " Sekunden</span></div><br>";
+  html += "<input type='submit' class='btn-stat' value='💾 Speichern'>";
+  html += "</form>";
+  html += "</div>";
+
+  // Regler 2: Batterie-Anzahl
+  html += "<div style='flex:1; min-width:250px;'>";
+  html += "<strong>Verbaute Akkus:</strong><br>";
+  html += "<form action='/setbatcount' method='GET' style='margin:0;'>";
+  html += "<input type='range' name='count' min='1' max='16' value='" + String(configuredBatteryCount) + "' oninput='document.getElementById(\"batVal\").innerText = this.value + \" Stück\";'>";
+  html += "<div>Aktuell: <span id='batVal' style='color:#00e5ff; font-weight:bold;'>" + String(configuredBatteryCount) + " Stück</span></div><br>";
+  html += "<input type='submit' class='btn-stat' value='💾 Speichern'>";
+  html += "</form>";
+  html += "</div>";
+
   html += "</div>";
 
   html += "<div class='system'>";
@@ -671,6 +731,7 @@ String buildDashboard()
     html += "Max Zelle: " + String(systemStats.maxCell, 3) + " V<br>";
   }
   html += "<br>MQTT Broker IP: " + (strlen(mqtt_server) > 0 ? String(mqtt_server) : String("Keine (Über Setup einrichten)")) + "<br>";
+  html += "Firmware: v" FW_VERSION "<br>";
   html += "</div>";
 
   html += "<h3>Aktivierte Batterien (Klicken für Details)</h3><div class='grid'>";
@@ -681,9 +742,6 @@ String buildDashboard()
 
     html += "<a class='box' href='/battery?id=" + String(i + 1) + "'>";
     html += "<strong>BATTERIE " + String(i + 1) + "</strong><br><br>";
-    if(!pwrFresh(batteries[i])) {
-      html += "<span class='stale'>&#9888; Daten veraltet</span><br>";
-    }
     html += "SOC: " + String(batteries[i].soc, 0) + "%<br>";
     html += "Spannung: " + String(batteries[i].voltage, 2) + " V<br>";
     html += "Strom: " + String(batteries[i].current, 2) + " A<br>";
@@ -704,7 +762,7 @@ String buildBatteryPage(int id)
 
   html += "<html><head><meta charset='utf-8'>";
   html += "<meta name='viewport' content='width=device-width, initial-scale=1'>";
-  html += "<meta http-equiv='refresh' content='5'>";
+  html += "<meta http-equiv='refresh' content='" + String(queryIntervalMs / 1000) + "'>";
   html += "<style>";
   html += "body{margin:0;font-family:Arial,sans-serif;background:#0f1115;color:#e6e6e6;}";
   html += "h1{margin:0;padding:15px;text-align:center;background:#151a22;color:#00e5ff;}";
@@ -723,7 +781,6 @@ String buildBatteryPage(int id)
 
   html += "<div class='box'>";
   html += "<strong>Zustand:</strong><br>";
-  if(!pwrFresh(b)) html += "<span class='stale'>&#9888; Daten veraltet</span><br>";
   html += "SOC: " + String(b.soc, 1) + " %<br>";
   html += "Spannung: " + String(b.voltage, 2) + " V<br>";
   html += "Strom: " + String(b.current, 2) + " A<br>";
@@ -779,9 +836,9 @@ String buildStatPage()
   html += "<a class='btn' href='/'>&larr; Zurück zum Dashboard</a>";
 
   if(statQueryInProgress) {
-    html += "<div class='status-load'>&#9203; Führe Befehl aus (stat)... Bitte warten.</div>";
+    html += "<div class='status-load'>⏳ Führe Befehl aus (stat)... Bitte warten.</div>";
   } else {
-    html += "<div style='color:#a3be8c;margin-bottom:10px;'>&#9989; Abfrage beendet.</div>";
+    html += "<div style='color:#a3be8c;margin-bottom:10px;'>✅ Abfrage beendet.</div>";
   }
 
   html += "<pre>";
@@ -832,21 +889,87 @@ void handleStatPage()
   server.send(200, "text/html", buildStatPage());
 }
 
-// Wird vom WiFiManager aufgerufen, wenn im Portal gespeichert wurde.
-// Die Werte stehen in den Parameter-Objekten, nicht in den char-Arrays.
-void saveParamCallback() {
-  strncpy(mqtt_server, custom_mqtt_server.getValue(), sizeof(mqtt_server) - 1);
-  strncpy(mqtt_user, custom_mqtt_user.getValue(), sizeof(mqtt_user) - 1);
-  strncpy(mqtt_pass, custom_mqtt_pass.getValue(), sizeof(mqtt_pass) - 1);
-  mqtt_server[sizeof(mqtt_server) - 1] = 0;
-  mqtt_user[sizeof(mqtt_user) - 1] = 0;
-  mqtt_pass[sizeof(mqtt_pass) - 1] = 0;
+void handleSetInterval()
+{
+  if (server.hasArg("sec")) {
+    unsigned int newSec = server.arg("sec").toInt();
+    if (newSec >= 5 && newSec <= 300) {
+      queryIntervalMs = newSec * 1000;
 
-  preferences.begin("mqtt-config", false);
-  preferences.putString("broker", mqtt_server);
-  preferences.putString("user", mqtt_user);
-  preferences.putString("pass", mqtt_pass);
-  preferences.end();
+      preferences.begin("mqtt-config", false);
+      preferences.putUInt("interval", queryIntervalMs);
+      preferences.end();
+    }
+  }
+  server.sendHeader("Location", "/");
+  server.send(302, "text/plain", "");
+}
+
+void handleSetBatCount()
+{
+  if (server.hasArg("count")) {
+    unsigned int newCount = server.arg("count").toInt();
+    if (newCount >= 1 && newCount <= 16) {
+      configuredBatteryCount = newCount;
+
+      preferences.begin("mqtt-config", false);
+      preferences.putUInt("batCount", configuredBatteryCount);
+      preferences.end();
+    }
+  }
+  server.sendHeader("Location", "/");
+  server.send(302, "text/plain", "");
+}
+
+void handleApiData()
+{
+  String json;
+  json.reserve(3000);
+
+  json += "{";
+  json += "\"version\":\"" FW_VERSION "\",";
+  json += "\"system\":{";
+  json += "\"avgSOC\":" + String(systemStats.avgSOC, 1) + ",";
+  json += "\"avgVoltage\":" + String(systemStats.avgVoltage, 2) + ",";
+  json += "\"totalCurrent\":" + String(systemStats.totalCurrent, 2) + ",";
+  json += "\"minCell\":" + String(systemStats.minCell, 3) + ",";
+  json += "\"maxCell\":" + String(systemStats.maxCell, 3) + ",";
+  json += "\"maxSystemTemp\":" + String(systemStats.maxSystemTemp, 1) + ",";
+  json += "\"maxSystemBmsTemp\":" + String(systemStats.maxSystemBmsTemp, 1);
+  json += "},";
+
+  json += "\"batteries\":[";
+  bool firstBat = true;
+  for(int i = 0; i < 16; i++) {
+    if(batteries[i].present) {
+      if(!firstBat) json += ",";
+      json += "{";
+      json += "\"id\":" + String(i + 1) + ",";
+      json += "\"soc\":" + String(batteries[i].soc, 0) + ",";
+      json += "\"voltage\":" + String(batteries[i].voltage, 2) + ",";
+      json += "\"current\":" + String(batteries[i].current, 2) + ",";
+      json += "\"temp\":" + String(batteries[i].temp, 1) + ",";
+      json += "\"tempLow\":" + String(batteries[i].tempLow, 1) + ",";
+      json += "\"tempHigh\":" + String(batteries[i].tempHigh, 1) + ",";
+
+      json += "\"cells\":[";
+      for(int c = 0; c < batteries[i].cellCount; c++) {
+        if(c > 0) json += ",";
+        json += String(batteries[i].cellVoltages[c], 3);
+      }
+      json += "]";
+      json += "}";
+      firstBat = false;
+    }
+  }
+  json += "]";
+  json += "}";
+
+  server.send(200, "application/json", json);
+}
+
+void saveParamCallback() {
+  shouldSaveConfig = true;
 }
 
 // ==========================
@@ -863,12 +986,12 @@ void setup()
   preferences.getString("broker", "").toCharArray(mqtt_server, 40);
   preferences.getString("user", "").toCharArray(mqtt_user, 40);
   preferences.getString("pass", "").toCharArray(mqtt_pass, 40);
-  preferences.end();
 
-  // Gespeicherte Werte als Vorgabe im Portal anzeigen
-  custom_mqtt_server.setValue(mqtt_server, 40);
-  custom_mqtt_user.setValue(mqtt_user, 40);
-  custom_mqtt_pass.setValue(mqtt_pass, 40);
+  // Werte laden
+  queryIntervalMs = preferences.getUInt("interval", 5500);
+  configuredBatteryCount = preferences.getUInt("batCount", 4);
+
+  preferences.end();
 
   // --- WLAN: stärksten AP wählen, Powersave aus, Auto-Reconnect an ---
   WiFi.mode(WIFI_STA);
@@ -878,9 +1001,15 @@ void setup()
   WiFi.setAutoReconnect(true);
 
   WiFiManager wm;
+
+  WiFiManagerParameter custom_mqtt_server("server", "MQTT Broker IP", mqtt_server, 40);
+  WiFiManagerParameter custom_mqtt_user("user", "MQTT Username (optional)", mqtt_user, 40);
+  WiFiManagerParameter custom_mqtt_pass("pass", "MQTT Passwort (optional)", mqtt_pass, 40, "type='password'");
+
   wm.addParameter(&custom_mqtt_server);
   wm.addParameter(&custom_mqtt_user);
   wm.addParameter(&custom_mqtt_pass);
+
   wm.setSaveParamsCallback(saveParamCallback);
   wm.setConnectTimeout(20);
   wm.setConfigPortalTimeout(180);   // Portal blockiert nicht mehr ewig
@@ -895,13 +1024,20 @@ void setup()
   WiFi.setSleep(false);
   WiFi.setAutoReconnect(true);
 
-  // Aktuelle Werte aus dem Portal übernehmen
   strncpy(mqtt_server, custom_mqtt_server.getValue(), sizeof(mqtt_server) - 1);
   strncpy(mqtt_user, custom_mqtt_user.getValue(), sizeof(mqtt_user) - 1);
   strncpy(mqtt_pass, custom_mqtt_pass.getValue(), sizeof(mqtt_pass) - 1);
   mqtt_server[sizeof(mqtt_server) - 1] = 0;
   mqtt_user[sizeof(mqtt_user) - 1] = 0;
   mqtt_pass[sizeof(mqtt_pass) - 1] = 0;
+
+  if (shouldSaveConfig) {
+    preferences.begin("mqtt-config", false);
+    preferences.putString("broker", mqtt_server);
+    preferences.putString("user", mqtt_user);
+    preferences.putString("pass", mqtt_pass);
+    preferences.end();
+  }
 
   if (MDNS.begin("pylontech")) {
     MDNS.addService("http", "tcp", 80);
@@ -914,15 +1050,20 @@ void setup()
   lastMqttSuccess = millis();
 
   // --- Serial: großer RX-Puffer VOR begin() ---
-  Serial0.setRxBufferSize(2048);
-  Serial0.begin(RS232_BAUD, SERIAL_8N1, RS232_RX_PIN, RS232_TX_PIN);
+  Serial1.setRxBufferSize(2048);
+  Serial1.begin(RS232_BAUD, SERIAL_8N1, RS232_RX_PIN, RS232_TX_PIN);
 
   server.on("/", handleRoot);
   server.on("/battery", handleBattery);
   server.on("/triggerstat", handleTriggerStat);
   server.on("/stat", handleStatPage);
+  server.on("/api/data", handleApiData);
 
-  server.on("/resetwifi", [](){
+  server.on("/setinterval", handleSetInterval);
+  server.on("/setbatcount", handleSetBatCount);
+
+  // Nur echte Klicks (POST) werden akzeptiert
+  server.on("/resetwifi", HTTP_POST, [](){
     server.send(200, "text/html", "<html><body style='background:#0f1115;color:#fff;'><h3>Monitor wird zurückgesetzt...</h3><p>WLAN-Daten gelöscht. Bitte verbinde dich gleich neu mit dem WLAN 'PylontechMonitor'.</p></body></html>");
     delay(2000);
     WiFiManager wm_reset;
@@ -947,7 +1088,7 @@ void setup()
 void loop()
 {
   if(statQueryInProgress && (millis() - statStartTime > 12000)) {
-    Serial0.print("unit 1\n");
+    Serial1.print("unit 1\n");
     statQueryInProgress = false;
     currentMode = MODE_NONE;
   }
@@ -956,7 +1097,7 @@ void loop()
   {
     servicePendingBat();
 
-    if(millis() - lastSend > 5500)
+    if(millis() - lastSend > queryIntervalMs)
     {
       if(nextQueryIndex == 0)
       {
@@ -976,10 +1117,11 @@ void loop()
           }
         }
         if(!queried){
-          // Alle Akkus durch: zurück auf Unit 1, nächster Slot startet wieder mit "pwr"
+          // Alle Akkus durch: zurück auf Unit 1 und gleich "pwr" abfragen
           if(currentMode == MODE_BAT) commitBat();
-          Serial0.print("unit 1\n");
-          nextQueryIndex = 0;
+          Serial1.print("unit 1\n");
+          requestPwr();
+          nextQueryIndex = 1;
         }
       }
       lastSend = millis();
