@@ -7,7 +7,7 @@
 #include <Preferences.h>
 #include "utilities.h"
 
-#define FW_VERSION "2.0.6"
+#define FW_VERSION "2.0.7"
 
 // ==========================
 // KONFIGURATION (Stabilität)
@@ -15,7 +15,7 @@
 const unsigned long WIFI_RECONNECT_MS = 30000;   // nach 30 s ohne WLAN: Reconnect versuchen
 const unsigned long WIFI_RESTART_MS   = 120000;  // nach 2 min ohne WLAN: Neustart
 const unsigned long MQTT_RESTART_MIN_MS = 300000; // Mindestzeit ohne MQTT-Erfolg bis Neustart (wächst mit Intervall)
-const unsigned long BAT_CMD_GAP_MS    = 400;     // Pause zwischen "unit X" und "bat X"
+const unsigned long BAT_CMD_GAP_MS    = 400;     // Pause zwischen "unit X" und dem nächsten Befehl
 
 // ==========================
 // MQTT GLOBALS
@@ -122,9 +122,11 @@ String rxBuffer = "";
 unsigned long lastSend = 0;
 int nextQueryIndex = 0;
 
-// Nicht-blockierende Sequenz "unit X" -> Pause -> "bat X"
-int pendingBatId = 0;
+// Nicht-blockierende Sequenzen mit Pause nach "unit X"
+int pendingBatId = 0;          // "unit X" gesendet, danach "bat X"
 unsigned long pendingBatAt = 0;
+bool pendingPwr = false;       // "unit 1" gesendet, danach "pwr"
+unsigned long pendingPwrAt = 0;
 
 String statOutput = "";
 bool statQueryInProgress = false;
@@ -192,27 +194,29 @@ void requestPwr()
 {
   if(currentMode == MODE_BAT) commitBat();   // angefangene bat-Antwort sichern
 
+  pendingPwr = false;
   flushRx();
   currentMode = MODE_PWR;
-  Serial1.print("\npwr\n");   // erstes \n weckt den Prompt auf, falls die Konsole hängt
+  Serial1.print("pwr\n");
 }
 
 void requestBat(int id)
 {
   if(currentMode == MODE_BAT) commitBat();
 
+  pendingPwr = false;
   flushRx();
   currentMode = MODE_NONE;       // Antwort auf "unit" nicht als Zelldaten interpretieren
   targetBatId = id;
   resetBatTmp(id);
 
-  Serial1.printf("\nunit %d\n", id);
+  Serial1.printf("unit %d\n", id);
   pendingBatId = id;
   pendingBatAt = millis() + BAT_CMD_GAP_MS;
 }
 
-// Sendet "bat X" erst nach kurzer Pause (ohne zu blockieren)
-void servicePendingBat()
+// Sendet "bat X" bzw. "pwr" erst nach kurzer Pause (ohne zu blockieren)
+void servicePending()
 {
   if(pendingBatId > 0 && (long)(millis() - pendingBatAt) >= 0)
   {
@@ -221,6 +225,11 @@ void servicePendingBat()
     Serial1.printf("bat %d\n", pendingBatId);
     pendingBatId = 0;
   }
+
+  if(pendingPwr && (long)(millis() - pendingPwrAt) >= 0)
+  {
+    requestPwr();   // setzt pendingPwr zurück
+  }
 }
 
 void triggerStatQuery(int unitId)
@@ -228,6 +237,7 @@ void triggerStatQuery(int unitId)
   if(currentMode == MODE_BAT) commitBat();
 
   pendingBatId = 0;
+  pendingPwr = false;
   flushRx();
   currentMode = MODE_STAT;
   statOutput = "";
@@ -369,9 +379,9 @@ void parseBatLine(String line)
 
 bool isEndOfResponse(const String &line)
 {
-  return line.indexOf("Command completed") >= 0 ||
-         line.indexOf("pylon>") >= 0 ||
-         line.startsWith("$$");
+  String t = line;
+  t.trim();
+  return t.startsWith("Command completed") || t == "$$" || t == "pylon>";
 }
 
 void readSerial()
@@ -395,12 +405,17 @@ void readSerial()
     if(c == '\n')
     {
       if(currentMode == MODE_PWR){
+        // Kein Antwortende-Erkennen: Zeilen werden einfach geparst, Nicht-Datenzeilen ignoriert
         parsePwrLine(rxBuffer);
-        if(isEndOfResponse(rxBuffer)) currentMode = MODE_NONE;
       }
       else if(currentMode == MODE_BAT){
         parseBatLine(rxBuffer);
-        if(isEndOfResponse(rxBuffer)) commitBat();   // Antwort komplett -> Werte übernehmen
+        // Ende nur akzeptieren, wenn schon Zellwerte empfangen wurden
+        if(isEndOfResponse(rxBuffer) &&
+           targetBatId >= 1 && targetBatId <= 16 &&
+           batteries[targetBatId - 1].tmpCellCount > 0) {
+          commitBat();
+        }
       }
       rxBuffer = "";
     }
@@ -1096,7 +1111,7 @@ void loop()
 
   if(!statQueryInProgress)
   {
-    servicePendingBat();
+    servicePending();
 
     if(millis() - lastSend > queryIntervalMs)
     {
@@ -1118,10 +1133,13 @@ void loop()
           }
         }
         if(!queried){
-          // Alle Akkus durch: zurück auf Unit 1 und gleich "pwr" abfragen
+          // Alle Akkus durch: zurück auf Unit 1, danach (nach kurzer Pause) "pwr"
           if(currentMode == MODE_BAT) commitBat();
+          flushRx();
+          currentMode = MODE_NONE;
           Serial1.print("unit 1\n");
-          requestPwr();
+          pendingPwr = true;
+          pendingPwrAt = millis() + BAT_CMD_GAP_MS;
           nextQueryIndex = 1;
         }
       }
