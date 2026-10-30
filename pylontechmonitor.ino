@@ -89,8 +89,9 @@ struct Battery {
 
 Battery batteries[16];
 
-bool pwrFresh(const Battery &b)   { return b.lastPwrUpdate  != 0 && (millis() - b.lastPwrUpdate)  < staleMs(); }
-bool cellsFresh(const Battery &b) { return b.lastCellUpdate != 0 && (millis() - b.lastCellUpdate) < staleMs(); }
+// Makros statt Funktionen (vermeidet Prototyp-Problem der Arduino IDE)
+#define pwrFresh(b)   ((b).lastPwrUpdate  != 0 && (millis() - (b).lastPwrUpdate)  < staleMs())
+#define cellsFresh(b) ((b).lastCellUpdate != 0 && (millis() - (b).lastCellUpdate) < staleMs())
 
 // ==========================
 // SYSTEM STATS
